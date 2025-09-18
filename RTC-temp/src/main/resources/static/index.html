@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>LiveKit Web Test</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 16px; }
+    video { width: 320px; height: 240px; background:#000; margin: 8px; }
+    #remotes video { display: inline-block; }
+    .row { display:flex; gap:12px; align-items:center; flex-wrap: wrap; }
+    input, select, button { padding: 6px 10px; }
+  </style>
+</head>
+<body>
+<h2>LiveKit Web Test</h2>
+
+<div class="row">
+  <label>Room:
+    <input id="room" value="demo" />
+  </label>
+  <label>Identity:
+    <input id="who" placeholder="your-name" />
+  </label>
+  <label>Role:
+    <select id="role">
+      <option value="speaker" selected>speaker</option>
+      <option value="listener">listener</option>
+      <option value="host">host</option>
+    </select>
+  </label>
+  <button id="joinBtn">Join</button>
+  <button id="leaveBtn" disabled>Leave</button>
+  <label><input type="checkbox" id="vid" checked /> Video</label>
+  <label><input type="checkbox" id="aud" checked /> Audio</label>
+</div>
+
+<h3>Local</h3>
+<video id="local" autoplay playsinline muted></video>
+
+<h3>Remotes</h3>
+<div id="remotes"></div>
+
+<pre id="log"></pre>
+
+<script type="module">
+  // Import the LiveKit JS client (ES module) from a CDN
+  import { Room, RoomEvent, createLocalTracks } from "https://cdn.skypack.dev/livekit-client";
+
+  const $ = (sel) => document.querySelector(sel);
+  const log = (m) => { const el = $("#log"); el.textContent += m + "\\n"; el.scrollTop = el.scrollHeight; };
+
+  let room;
+
+  async function join() {
+    const roomName = $("#room").value.trim() || "demo";
+    const identity = $("#who").value.trim() || ("u-" + Math.random().toString(36).slice(2));
+    const role = $("#role").value;
+
+    $("#joinBtn").disabled = true;
+
+    // 1) Fetch URL + token from your Spring endpoint
+    const res = await fetch(`/api/rtc/token?room=${encodeURIComponent(roomName)}&identity=${encodeURIComponent(identity)}&role=${encodeURIComponent(role)}`);
+    if (!res.ok) {
+      log("Token fetch failed: " + res.status);
+      $("#joinBtn").disabled = false;
+      return;
+    }
+    const { url, token } = await res.json();
+    log("Got token. Connecting to " + url);
+
+    // 2) Connect to the LiveKit room
+    room = new Room();
+    room
+      .on(RoomEvent.Connected, () => log("Connected as " + identity))
+      .on(RoomEvent.Disconnected, () => log("Disconnected"))
+      .on(RoomEvent.ParticipantConnected, (p) => log("Participant joined: " + p.identity))
+      .on(RoomEvent.ParticipantDisconnected, (p) => log("Participant left: " + p.identity))
+      .on(RoomEvent.TrackSubscribed, (track, pub, participant) => {
+        const el = track.attach();
+        el.autoplay = true; el.playsInline = true;
+        $("#remotes").appendChild(el);
+        log(`TrackSubscribed: ${participant.identity} → ${track.kind}`);
+      })
+      .on(RoomEvent.TrackUnsubscribed, (track) => {
+        track.detach().forEach((el) => el.remove());
+      });
+
+    await room.connect(url, token);
+
+    // 3) Publish local tracks (if allowed by role)
+    const wantVideo = $("#vid").checked;
+    const wantAudio = $("#aud").checked;
+
+    if (wantAudio || wantVideo) {
+      const tracks = await createLocalTracks({ audio: wantAudio, video: wantVideo });
+      for (const t of tracks) {
+        await room.localParticipant.publishTrack(t);
+        if (t.kind === "video") {
+          $("#local").srcObject = new MediaStream([t.mediaStreamTrack]);
+        }
+      }
+      log("Published local tracks");
+    } else {
+      log("Joined without publishing (listener)");
+    }
+
+    $("#leaveBtn").disabled = false;
+  }
+
+  async function leave() {
+    if (room) {
+      await room.disconnect();
+      room = undefined;
+    }
+    $("#leaveBtn").disabled = true;
+    $("#joinBtn").disabled = false;
+    $("#local").srcObject = null;
+    $("#remotes").innerHTML = "";
+  }
+
+  $("#joinBtn").addEventListener("click", join);
+  $("#leaveBtn").addEventListener("click", leave);
+
+  // Optional: allow quick test via URL params ?room=demo&who=alice
+  const params = new URLSearchParams(location.search);
+  if (params.has("room") || params.has("who")) {
+    $("#room").value = params.get("room") || "demo";
+    $("#who").value = params.get("who") || "";
+  }
+</script>
+</body>
+</html>
